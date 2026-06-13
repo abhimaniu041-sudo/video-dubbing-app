@@ -2,6 +2,7 @@
   "expo": {
     "name": "AI Video Dubber",
     "slug": "video-dubbing-app",
+    "owner": "abhimaniu041-sudo",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -29,9 +30,6 @@
         "RECORD_AUDIO",
         "INTERNET"
       ]
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-av",
