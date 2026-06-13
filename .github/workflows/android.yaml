@@ -31,43 +31,42 @@ jobs:
       - name: 📦 Install dependencies
         run: npm install --legacy-peer-deps --no-package-lock
 
-      - name: 🖼 Create valid PNG assets using Node.js
+      - name: 🖼 Create valid PNG assets using Python
         run: |
-          node -e "
-          const fs = require('fs');
-          
-          // Valid 100x100 purple PNG created with raw buffer
-          // This is a real minimal PNG file
-          const { createCanvas } = require('canvas') || {};
-          
-          // Use pure Node.js Buffer to write valid PNG
-          // PNG signature + IHDR + IDAT + IEND
-          const PNG_1x1_RED = Buffer.from([
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
-            0x54, 0x08, 0xD7, 0x63, 0x6C, 0x6C, 0xF8, 0x0F,
-            0x00, 0x00, 0x04, 0x04, 0x00, 0x01, 0x32, 0xD5,
-            0xEB, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
-            0x44, 0xAE, 0x42, 0x60, 0x82
-          ]);
-          
-          fs.mkdirSync('assets', { recursive: true });
-          fs.writeFileSync('assets/icon.png', PNG_1x1_RED);
-          fs.writeFileSync('assets/splash.png', PNG_1x1_RED);
-          fs.writeFileSync('assets/adaptive-icon.png', PNG_1x1_RED);
-          fs.writeFileSync('assets/favicon.png', PNG_1x1_RED);
-          console.log('Assets created, sizes:', fs.statSync('assets/icon.png').size);
-          "
-          echo "✅ PNG assets created"
+          mkdir -p assets
+          python3 - <<'EOF'
+import struct
+import zlib
 
-      - name: 🔍 Verify PNG files
-        run: |
+def make_png(width=100, height=100, r=108, g=99, b=255):
+    def chunk(name, data):
+        c = name + data
+        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+    
+    sig = b'\x89PNG\r\n\x1a\n'
+    ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    ihdr = chunk(b'IHDR', ihdr_data)
+    
+    raw = b''
+    for y in range(height):
+        raw += b'\x00'
+        for x in range(width):
+            raw += bytes([r, g, b])
+    
+    compressed = zlib.compress(raw)
+    idat = chunk(b'IDAT', compressed)
+    iend = chunk(b'IEND', b'')
+    
+    return sig + ihdr + idat + iend
+
+png = make_png()
+for name in ['assets/icon.png', 'assets/splash.png', 'assets/adaptive-icon.png', 'assets/favicon.png']:
+    with open(name, 'wb') as f:
+        f.write(png)
+    print(f'Created {name}: {len(png)} bytes')
+EOF
+          echo "✅ PNG assets created"
           file assets/icon.png
-          file assets/splash.png
-          ls -la assets/
 
       - name: 🔧 Prebuild Android folder
         run: |
@@ -94,5 +93,5 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      - name: ✅ Success
+      - name: ✅ Done
         run: echo "🎉 APK ready! Download from Artifacts above."
