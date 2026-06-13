@@ -7,9 +7,8 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0a0a1a"
+      "backgroundColor": "#0a0a1a",
+      "resizeMode": "contain"
     },
     "assetBundlePatterns": ["**/*"],
     "android": {
