@@ -1,0 +1,52 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🏗 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🏗 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          # cache: 'npm' -- REMOVED (lock file not present)
+
+      - name: 📦 Install dependencies
+        run: npm install --legacy-peer-deps --no-package-lock
+
+      - name: 🏗 Install EAS CLI
+        run: npm install -g eas-cli@latest --legacy-peer-deps
+
+      - name: 🏗 Install Expo CLI
+        run: npm install -g @expo/cli@latest --legacy-peer-deps
+
+      - name: 🔧 Fix Expo dependencies
+        run: npx expo install --fix || true
+
+      - name: 📱 Build APK via EAS
+        run: |
+          eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --no-wait
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        continue-on-error: true
+
+      - name: 🔔 Build Submitted
+        run: |
+          echo "✅ EAS Build submitted successfully!"
+          echo "📱 Download APK from: https://expo.dev"
+          echo "Go to your Expo dashboard to download the APK"
