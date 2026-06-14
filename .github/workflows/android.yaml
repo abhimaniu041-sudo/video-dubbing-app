@@ -46,12 +46,15 @@ jobs:
       - name: Create JS Bundle
         run: |
           mkdir -p android/app/src/main/assets
-          npx expo export:embed \
+          node node_modules/.bin/react-native bundle \
             --platform android \
-            --output-dir android/app/src/main/assets \
-            --dev false
+            --dev false \
+            --entry-file index.js \
+            --bundle-output android/app/src/main/assets/index.android.bundle \
+            --assets-dest android/app/src/main/res \
+            --config metro.config.js \
+            --reset-cache
         env:
-          CI: 1
           NODE_ENV: production
 
       - name: Create Keystore
@@ -73,11 +76,7 @@ jobs:
           cd android
           ./gradlew assembleRelease \
             --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=512m" \
-            -PMYAPP_RELEASE_STORE_FILE=release.keystore \
-            -PMYAPP_RELEASE_KEY_ALIAS=releasekey \
-            -PMYAPP_RELEASE_STORE_PASSWORD=password123 \
-            -PMYAPP_RELEASE_KEY_PASSWORD=password123
+            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=512m"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -87,4 +86,4 @@ jobs:
           retention-days: 30
 
       - name: Done
-        run: echo "APK ready! Download from Artifacts."
+        run: echo "APK ready!"
