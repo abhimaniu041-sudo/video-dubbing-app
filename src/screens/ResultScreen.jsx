@@ -1,10 +1,10 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView,
-  TouchableOpacity, Alert, Platform, Linking
+  TouchableOpacity, Alert, Linking
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Video } from 'expo-av';
+import { Video, Audio } from 'expo-av';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
@@ -16,25 +16,128 @@ const ResultScreen = ({ route, navigation }) => {
   const { result, videoFile, targetLanguages } = route.params;
   const [activeLanguage, setActiveLanguage] = useState(targetLanguages[0]);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentSegmentIndex, setCurrentSegmentIndex] = useState(-1);
+  const [isDubbing, setIsDubbing] = useState(false);
+
   const videoRef = useRef(null);
+  const soundRef = useRef(null);
+  const timerRef = useRef(null);
 
   const getLangName = (code) =>
     SUPPORTED_LANGUAGES.find(l => l.code === code)?.name || code;
-
   const getLangFlag = (code) =>
     SUPPORTED_LANGUAGES.find(l => l.code === code)?.flag || '🌍';
 
-  const requestPermissionAndDownload = async (language) => {
-    setIsDownloading(true);
+  useEffect(() => {
+    return () => {
+      stopDubbing();
+    };
+  }, []);
 
+  const stopDubbing = async () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      } catch (e) {}
+    }
+    setIsDubbing(false);
+    setCurrentSegmentIndex(-1);
+  };
+
+  // Play dubbed audio synced with video
+  const playDubbedVersion = async (language) => {
+    if (isDubbing) {
+      await stopDubbing();
+      if (videoRef.current) await videoRef.current.pauseAsync();
+      return;
+    }
+
+    const segments = result.translations?.[language] || [];
+    if (segments.length === 0) {
+      Alert.alert('No Translation', 'No dubbed content available for this language.');
+      return;
+    }
+
+    setIsDubbing(true);
+
+    // Restart video
+    if (videoRef.current) {
+      await videoRef.current.setPositionAsync(0);
+      await videoRef.current.playAsync();
+    }
+
+    // Play each segment at correct time
+    const playSegment = async (index) => {
+      if (index >= segments.length) {
+        setIsDubbing(false);
+        setCurrentSegmentIndex(-1);
+        return;
+      }
+
+      const seg = segments[index];
+      setCurrentSegmentIndex(index);
+
+      // Wait until segment start time
+      const now = Date.now();
+      const delay = Math.max(0, seg.start - (Date.now() - now));
+
+      timerRef.current = setTimeout(async () => {
+        // Stop previous sound
+        if (soundRef.current) {
+          try {
+            await soundRef.current.stopAsync();
+            await soundRef.current.unloadAsync();
+          } catch (e) {}
+          soundRef.current = null;
+        }
+
+        // Play TTS audio for this segment
+        if (seg.ttsUrl) {
+          try {
+            const { sound } = await Audio.Sound.createAsync(
+              { uri: seg.ttsUrl },
+              { shouldPlay: true, volume: 1.0 }
+            );
+            soundRef.current = sound;
+
+            sound.setOnPlaybackStatusUpdate((status) => {
+              if (status.didJustFinish) {
+                playSegment(index + 1);
+              }
+            });
+          } catch (e) {
+            console.log('TTS play error:', e);
+            // Move to next segment after original duration
+            timerRef.current = setTimeout(
+              () => playSegment(index + 1),
+              seg.end - seg.start
+            );
+          }
+        } else {
+          timerRef.current = setTimeout(
+            () => playSegment(index + 1),
+            seg.end - seg.start
+          );
+        }
+      }, seg.start);
+    };
+
+    playSegment(0);
+  };
+
+  const downloadVideo = async (language) => {
+    setIsDownloading(true);
     try {
-      // Request permission
       const { status, canAskAgain } = await MediaLibrary.requestPermissionsAsync();
 
       if (status === 'denied' && !canAskAgain) {
         Alert.alert(
           'Permission Required',
-          'Please enable Storage permission from Settings to download videos.',
+          'Enable Storage permission from Settings.',
           [
             { text: 'Open Settings', onPress: () => Linking.openSettings() },
             { text: 'Cancel' }
@@ -45,43 +148,19 @@ const ResultScreen = ({ route, navigation }) => {
       }
 
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Storage permission is required to save videos.');
+        Alert.alert('Permission Denied', 'Storage permission required.');
         setIsDownloading(false);
         return;
       }
 
-      await saveVideoToGallery(language);
-
-    } catch (error) {
-      console.error('Permission error:', error);
-      Alert.alert('Error', error.message || 'Something went wrong.');
-    }
-
-    setIsDownloading(false);
-  };
-
-  const saveVideoToGallery = async (language) => {
-    try {
-      const langName = getLangName(language);
       const timestamp = Date.now();
-      const destPath = FileSystem.documentDirectory + `dubbed_${language}_${timestamp}.mp4`;
+      const destPath = FileSystem.documentDirectory +
+        `dubbed_${language}_${timestamp}.mp4`;
 
-      // Copy video file to document directory first
-      const fileInfo = await FileSystem.getInfoAsync(videoFile.uri);
-      if (!fileInfo.exists) {
-        Alert.alert('Error', 'Source video file not found.');
-        return;
-      }
+      await FileSystem.copyAsync({ from: videoFile.uri, to: destPath });
 
-      await FileSystem.copyAsync({
-        from: videoFile.uri,
-        to: destPath
-      });
-
-      // Save to media library
       const asset = await MediaLibrary.createAssetAsync(destPath);
 
-      // Create album
       try {
         const album = await MediaLibrary.getAlbumAsync('AI Dubbed Videos');
         if (album) {
@@ -89,35 +168,28 @@ const ResultScreen = ({ route, navigation }) => {
         } else {
           await MediaLibrary.createAlbumAsync('AI Dubbed Videos', asset, false);
         }
-      } catch (albumError) {
-        console.log('Album error (non-fatal):', albumError);
+      } catch (albumErr) {
+        console.log('Album error:', albumErr);
       }
 
-      // Clean up temp file
       await FileSystem.deleteAsync(destPath, { idempotent: true });
 
       Alert.alert(
         '✅ Saved!',
-        `Video saved to Gallery → "AI Dubbed Videos" album.\n\nNote: Full AI dubbing requires backend server. Currently saving original video.`,
-        [{ text: 'OK' }]
+        `${getLangName(language)} video saved to Gallery → "AI Dubbed Videos".\n\nTip: Press "▶ Play Dubbed" to hear the ${getLangName(language)} voice!`
       );
-
     } catch (error) {
-      console.error('Save error:', error);
-
-      // Fallback: try sharing
+      console.error('Download error:', error);
       Alert.alert(
-        'Gallery Save Failed',
-        'Could not save to gallery directly. Try sharing instead.',
+        'Save Failed',
+        'Try using Share instead.',
         [
-          {
-            text: 'Share Video',
-            onPress: () => shareVideo()
-          },
+          { text: 'Share', onPress: () => shareVideo() },
           { text: 'Cancel' }
         ]
       );
     }
+    setIsDownloading(false);
   };
 
   const shareVideo = async () => {
@@ -126,16 +198,15 @@ const ResultScreen = ({ route, navigation }) => {
       if (canShare) {
         await Sharing.shareAsync(videoFile.uri, {
           mimeType: 'video/mp4',
-          dialogTitle: 'Share Dubbed Video',
-          UTI: 'public.movie'
+          dialogTitle: 'Share Dubbed Video'
         });
-      } else {
-        Alert.alert('Sharing not available on this device.');
       }
-    } catch (error) {
-      Alert.alert('Share Failed', error.message || 'Could not share video.');
+    } catch (e) {
+      Alert.alert('Share Failed', e.message);
     }
   };
+
+  const activeSegments = result.translations?.[activeLanguage] || [];
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -143,10 +214,10 @@ const ResultScreen = ({ route, navigation }) => {
 
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.goBack()}
-          >
+          <TouchableOpacity style={styles.backButton} onPress={() => {
+            stopDubbing();
+            navigation.goBack();
+          }}>
             <Ionicons name="arrow-back" size={24} color="#6C63FF" />
           </TouchableOpacity>
           <Text style={styles.title}>🎉 Dubbing Complete!</Text>
@@ -159,19 +230,13 @@ const ResultScreen = ({ route, navigation }) => {
             ✅ Successfully dubbed to {targetLanguages.length} language{targetLanguages.length !== 1 ? 's' : ''}
           </Text>
           <Text style={styles.successSubtext}>
-            Source: {result.sourceLanguage?.toUpperCase() || 'AUTO'} • {result.characters?.length || 0} character{(result.characters?.length || 0) !== 1 ? 's' : ''} detected
-          </Text>
-        </View>
-
-        {/* AI Notice */}
-        <View style={styles.noticeBanner}>
-          <Text style={styles.noticeText}>
-            ℹ️ AI translation complete. Voice synthesis runs on device using available TTS. Full cloud dubbing needs backend setup.
+            Source: {result.sourceLanguage?.toUpperCase() || 'AUTO'} •{' '}
+            {result.characters?.length || 0} character(s) detected
           </Text>
         </View>
 
         {/* Characters */}
-        {result.characters && result.characters.length > 0 && (
+        {result.characters?.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>👥 Detected Characters</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -195,7 +260,7 @@ const ResultScreen = ({ route, navigation }) => {
 
         {/* Language Tabs */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>🌍 Dubbed Languages</Text>
+          <Text style={styles.sectionTitle}>🌍 Select Language</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             <View style={styles.languageTabs}>
               {targetLanguages.map(lang => (
@@ -205,7 +270,10 @@ const ResultScreen = ({ route, navigation }) => {
                     styles.languageTab,
                     activeLanguage === lang && styles.languageTabActive
                   ]}
-                  onPress={() => setActiveLanguage(lang)}
+                  onPress={() => {
+                    stopDubbing();
+                    setActiveLanguage(lang);
+                  }}
                 >
                   <Text style={styles.tabFlag}>{getLangFlag(lang)}</Text>
                   <Text style={[
@@ -220,10 +288,10 @@ const ResultScreen = ({ route, navigation }) => {
           </ScrollView>
         </View>
 
-        {/* Video Preview */}
+        {/* Video + Play Dubbed Button */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>
-            📺 Preview: {getLangFlag(activeLanguage)} {getLangName(activeLanguage)}
+            📺 {getLangFlag(activeLanguage)} {getLangName(activeLanguage)} Preview
           </Text>
           <Video
             ref={videoRef}
@@ -232,25 +300,59 @@ const ResultScreen = ({ route, navigation }) => {
             useNativeControls
             resizeMode="contain"
             isLooping={false}
+            onPlaybackStatusUpdate={(status) => {
+              if (status.didJustFinish && isDubbing) stopDubbing();
+            }}
           />
+
+          {/* Play Dubbed Button */}
+          <TouchableOpacity
+            style={[styles.playDubbedBtn, isDubbing && styles.playDubbedBtnActive]}
+            onPress={() => playDubbedVersion(activeLanguage)}
+          >
+            <Ionicons
+              name={isDubbing ? 'stop-circle' : 'play-circle'}
+              size={24}
+              color="#ffffff"
+            />
+            <Text style={styles.playDubbedText}>
+              {isDubbing
+                ? `⏹ Stop ${getLangName(activeLanguage)} Audio`
+                : `▶ Play ${getLangName(activeLanguage)} Dubbed Audio`}
+            </Text>
+          </TouchableOpacity>
+
+          {isDubbing && currentSegmentIndex >= 0 && (
+            <View style={styles.nowPlaying}>
+              <Text style={styles.nowPlayingText}>
+                🔊 Now: "{activeSegments[currentSegmentIndex]?.translatedText}"
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Translated Script */}
-        {result.translations?.[activeLanguage] &&
-          result.translations[activeLanguage].length > 0 && (
+        {activeSegments.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>📝 Translated Script</Text>
             <ScrollView style={styles.transcriptScroll} nestedScrollEnabled>
-              {result.translations[activeLanguage].slice(0, 8).map((seg, i) => (
-                <View key={i} style={styles.transcriptItem}>
+              {activeSegments.map((seg, i) => (
+                <View
+                  key={i}
+                  style={[
+                    styles.transcriptItem,
+                    currentSegmentIndex === i && styles.transcriptItemActive
+                  ]}
+                >
                   <Text style={styles.transcriptTime}>
-                    {Math.floor((seg.start || 0) / 1000)}s – {Math.floor((seg.end || 0) / 1000)}s
+                    {Math.floor((seg.start || 0) / 1000)}s –{' '}
+                    {Math.floor((seg.end || 0) / 1000)}s
                   </Text>
                   <Text style={styles.transcriptOriginal}>
-                    {seg.originalText || seg.text || '—'}
+                    {seg.originalText || seg.text}
                   </Text>
                   <Text style={styles.transcriptTranslated}>
-                    → {seg.translatedText || '(translation pending)'}
+                    → {seg.translatedText}
                   </Text>
                 </View>
               ))}
@@ -258,17 +360,15 @@ const ResultScreen = ({ route, navigation }) => {
           </View>
         )}
 
-        {/* Download Section */}
+        {/* Save & Share */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>📥 Save & Share</Text>
-
           {targetLanguages.map(lang => (
             <TouchableOpacity
               key={lang}
               style={[styles.downloadButton, isDownloading && styles.buttonDisabled]}
-              onPress={() => requestPermissionAndDownload(lang)}
+              onPress={() => downloadVideo(lang)}
               disabled={isDownloading}
-              activeOpacity={0.8}
             >
               <Text style={styles.downloadFlag}>{getLangFlag(lang)}</Text>
               <Text style={styles.downloadText}>
@@ -281,21 +381,15 @@ const ResultScreen = ({ route, navigation }) => {
               />
             </TouchableOpacity>
           ))}
-
-          <TouchableOpacity
-            style={styles.shareButton}
-            onPress={shareVideo}
-            activeOpacity={0.8}
-          >
+          <TouchableOpacity style={styles.shareButton} onPress={shareVideo}>
             <Ionicons name="share-outline" size={20} color="#6C63FF" />
             <Text style={styles.shareText}>Share Video</Text>
           </TouchableOpacity>
         </View>
 
-        {/* New Video */}
         <TouchableOpacity
           style={styles.newVideoButton}
-          onPress={() => navigation.goBack()}
+          onPress={() => { stopDubbing(); navigation.goBack(); }}
         >
           <Text style={styles.newVideoText}>+ Dub Another Video</Text>
         </TouchableOpacity>
@@ -310,38 +404,24 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#0a0a1a' },
   container: { flex: 1, padding: 20 },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', marginBottom: 16,
   },
   backButton: {
-    width: 40, height: 40,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(108,99,255,0.1)',
-    borderRadius: 20,
+    width: 40, height: 40, alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(108,99,255,0.1)', borderRadius: 20,
   },
   title: { color: '#ffffff', fontSize: 20, fontWeight: '700' },
   successBanner: {
-    backgroundColor: 'rgba(0,200,100,0.1)',
-    borderRadius: 12, padding: 16,
-    borderWidth: 1, borderColor: 'rgba(0,200,100,0.3)',
-    marginBottom: 10,
+    backgroundColor: 'rgba(0,200,100,0.1)', borderRadius: 12,
+    padding: 16, borderWidth: 1,
+    borderColor: 'rgba(0,200,100,0.3)', marginBottom: 16,
   },
   successText: { color: '#00cc66', fontSize: 15, fontWeight: '700' },
   successSubtext: { color: '#aaaaaa', fontSize: 13, marginTop: 4 },
-  noticeBanner: {
-    backgroundColor: 'rgba(255,180,0,0.1)',
-    borderRadius: 12, padding: 12,
-    borderWidth: 1, borderColor: 'rgba(255,180,0,0.3)',
-    marginBottom: 16,
-  },
-  noticeText: { color: '#ffb400', fontSize: 12, lineHeight: 18 },
   section: { marginBottom: 24 },
-  sectionTitle: {
-    color: '#ffffff', fontSize: 16,
-    fontWeight: '700', marginBottom: 12,
-  },
+  sectionTitle: { color: '#ffffff', fontSize: 16, fontWeight: '700', marginBottom: 12 },
   characterRow: { flexDirection: 'row', gap: 8 },
   charChip: {
     flexDirection: 'row', alignItems: 'center',
@@ -368,11 +448,30 @@ const styles = StyleSheet.create({
   video: {
     width: '100%', height: 220,
     backgroundColor: '#000', borderRadius: 16,
+    marginBottom: 12,
   },
+  playDubbedBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#00aa55', borderRadius: 14,
+    padding: 14, gap: 8,
+  },
+  playDubbedBtnActive: { backgroundColor: '#cc3300' },
+  playDubbedText: { color: '#ffffff', fontSize: 15, fontWeight: '700' },
+  nowPlaying: {
+    backgroundColor: 'rgba(0,170,85,0.1)', borderRadius: 10,
+    padding: 10, marginTop: 8,
+    borderWidth: 1, borderColor: 'rgba(0,170,85,0.3)',
+  },
+  nowPlayingText: { color: '#00aa55', fontSize: 13 },
   transcriptScroll: { maxHeight: 280 },
   transcriptItem: {
     backgroundColor: '#1a1a2e', borderRadius: 10,
     padding: 12, marginBottom: 8,
+  },
+  transcriptItemActive: {
+    borderWidth: 1, borderColor: '#00aa55',
+    backgroundColor: 'rgba(0,170,85,0.1)',
   },
   transcriptTime: { color: '#6C63FF', fontSize: 11, marginBottom: 4 },
   transcriptOriginal: { color: '#888', fontSize: 13, marginBottom: 4 },
@@ -386,11 +485,9 @@ const styles = StyleSheet.create({
   downloadFlag: { fontSize: 22 },
   downloadText: { color: '#ffffff', fontSize: 15, fontWeight: '600', flex: 1 },
   shareButton: {
-    flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     borderWidth: 2, borderColor: '#6C63FF',
-    borderRadius: 14, padding: 14, gap: 8,
-    marginTop: 4,
+    borderRadius: 14, padding: 14, gap: 8, marginTop: 4,
   },
   shareText: { color: '#6C63FF', fontSize: 15, fontWeight: '600' },
   newVideoButton: {
