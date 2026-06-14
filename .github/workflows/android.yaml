@@ -1,0 +1,62 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --no-package-lock
+
+      - name: Create PNG assets
+        run: python3 scripts/make_assets.py
+
+      - name: Verify assets
+        run: ls -la assets/
+
+      - name: Prebuild Android
+        run: npx expo prebuild --platform android --clean
+        env:
+          EXPO_NO_DOCTOR: 1
+          CI: 1
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon -Dorg.gradle.jvmargs="-Xmx3072m"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoDubber-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Done
+        run: echo "APK ready! Download from Artifacts above."
