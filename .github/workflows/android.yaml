@@ -43,7 +43,7 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Bundle JS into APK
+      - name: Create JS Bundle
         run: |
           mkdir -p android/app/src/main/assets
           npx react-native bundle \
@@ -51,7 +51,33 @@ jobs:
             --dev false \
             --entry-file index.js \
             --bundle-output android/app/src/main/assets/index.android.bundle \
-            --assets-dest android/app/src/main/res
+            --assets-dest android/app/src/main/res \
+            --reset-cache
+
+      - name: Create Keystore
+        run: |
+          cd android/app
+          keytool -genkeypair \
+            -v \
+            -keystore release.keystore \
+            -alias releasekey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass password123 \
+            -keypass password123 \
+            -dname "CN=VideoDubber,O=App,C=IN"
+
+      - name: Fix gradle signing
+        run: |
+          cat >> android/app/build.gradle << 'GRADLE'
+
+          android.buildTypes.release.signingConfig = android.signingConfigs.create("releaseConfig")
+          android.signingConfigs.releaseConfig.storeFile = file("release.keystore")
+          android.signingConfigs.releaseConfig.storePassword = "password123"
+          android.signingConfigs.releaseConfig.keyAlias = "releasekey"
+          android.signingConfigs.releaseConfig.keyPassword = "password123"
+          GRADLE
 
       - name: Build Release APK
         run: |
@@ -68,4 +94,4 @@ jobs:
           retention-days: 30
 
       - name: Done
-        run: echo "APK ready! Download from Artifacts above."
+        run: echo "APK ready!"
